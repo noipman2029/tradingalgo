@@ -1,5 +1,5 @@
 """
-Technical indicators: Williams %R and Bollinger Bands.
+Technical indicators: Williams %R, Bollinger Bands, and SMA.
 Pure numpy/pandas implementations (no TA-Lib dependency).
 """
 
@@ -21,7 +21,6 @@ def williams_r(df: pd.DataFrame, period: int = 14) -> pd.Series:
     low_roll = df["low"].rolling(window=period).min()
 
     hl_range = high_roll - low_roll
-    # Avoid division by zero
     hl_range = hl_range.replace(0, np.nan)
 
     wr = (high_roll - df["close"]) / hl_range * (-100.0)
@@ -33,7 +32,6 @@ def bollinger_bands(
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
     """
     Calculate Bollinger Bands.
-
     Returns: (upper_band, middle_band, lower_band)
     """
     middle = df["close"].rolling(window=period).mean()
@@ -45,13 +43,22 @@ def bollinger_bands(
     return upper, middle, lower
 
 
-def bollinger_bandwidth(upper: pd.Series, lower: pd.Series,
-                        middle: pd.Series) -> pd.Series:
+def sma(df: pd.DataFrame, period: int = 20) -> pd.Series:
+    """Simple Moving Average on close price."""
+    return df["close"].rolling(window=period).mean()
+
+
+def sma_slope(sma_series: pd.Series, lookback: int = 3) -> float:
     """
-    Bollinger Bandwidth = (Upper - Lower) / Middle * 100
-    Useful for dynamic SL/TP calculation.
+    Return the slope direction of the SMA over the last `lookback` bars.
+    Positive = rising, negative = falling.
     """
-    return (upper - lower) / middle * 100.0
+    if len(sma_series) < lookback + 1:
+        return 0.0
+    recent = sma_series.iloc[-lookback:]
+    if recent.isna().any():
+        return 0.0
+    return float(recent.iloc[-1] - recent.iloc[0])
 
 
 def compute_all_indicators(
@@ -59,13 +66,14 @@ def compute_all_indicators(
     williams_period: int = 14,
     bb_period: int = 20,
     bb_std: float = 2.0,
+    sma_period: int = 20,
 ) -> pd.DataFrame:
     """
     Compute all indicators and add them as columns to the dataframe.
     Returns a copy with added columns:
         - williams_r
         - bb_upper, bb_middle, bb_lower
-        - bb_bandwidth
+        - sma
     """
     result = df.copy()
 
@@ -75,6 +83,7 @@ def compute_all_indicators(
     result["bb_upper"] = upper
     result["bb_middle"] = middle
     result["bb_lower"] = lower
-    result["bb_bandwidth"] = bollinger_bandwidth(upper, lower, middle)
+
+    result["sma"] = sma(result, sma_period)
 
     return result

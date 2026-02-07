@@ -1,11 +1,11 @@
 """
 Tkinter GUI for the MT5 Scalping Bot.
-Provides controls, real-time indicator display, trade log, and parameter tuning.
+Displays strategy state machine, real-time indicators (WR, BB, SMA),
+3-TP levels, trade log, positions, and parameter tuning.
 """
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
-import threading
 
 
 class ScalpBotGUI:
@@ -16,12 +16,11 @@ class ScalpBotGUI:
         self.engine = bot_engine
 
         self.root = tk.Tk()
-        self.root.title("MT5 Scalping Bot - Williams %R + Bollinger Bands")
-        self.root.geometry("1050x750")
+        self.root.title("MT5 Scalping Bot - WR Reintegration + BB + SMA")
+        self.root.geometry("1100x800")
         self.root.resizable(True, True)
         self.root.configure(bg="#1e1e2e")
 
-        # Style
         self.style = ttk.Style()
         self.style.theme_use("clam")
         self._configure_styles()
@@ -32,6 +31,7 @@ class ScalpBotGUI:
         self.engine.on_status = lambda s: self.root.after(0, self._update_status, s)
         self.engine.on_positions = lambda p: self.root.after(0, self._update_positions, p)
         self.engine.on_indicators = lambda d: self.root.after(0, self._update_indicators, d)
+        self.engine.on_state = lambda s: self.root.after(0, self._update_state, s)
 
         self._build_ui()
 
@@ -42,6 +42,7 @@ class ScalpBotGUI:
         accent = "#89b4fa"
         green = "#a6e3a1"
         red = "#f38ba8"
+        yellow = "#f9e2af"
 
         s.configure("TFrame", background=bg)
         s.configure("TLabel", background=bg, foreground=fg, font=("Consolas", 10))
@@ -50,6 +51,8 @@ class ScalpBotGUI:
         s.configure("Buy.TLabel", background=bg, foreground=green,
                      font=("Consolas", 11, "bold"))
         s.configure("Sell.TLabel", background=bg, foreground=red,
+                     font=("Consolas", 11, "bold"))
+        s.configure("Watch.TLabel", background=bg, foreground=yellow,
                      font=("Consolas", 11, "bold"))
         s.configure("Status.TLabel", background="#313244", foreground=fg,
                      font=("Consolas", 10), padding=5)
@@ -66,10 +69,15 @@ class ScalpBotGUI:
                      font=("Consolas", 9, "bold"))
 
     def _build_ui(self):
-        # Top bar: controls + status
+        # Top bar
         top = ttk.Frame(self.root)
         top.pack(fill=tk.X, padx=10, pady=5)
         self._build_control_bar(top)
+
+        # State bar
+        state_frame = ttk.Frame(self.root)
+        state_frame.pack(fill=tk.X, padx=10, pady=2)
+        self._build_state_bar(state_frame)
 
         # Main area
         main = ttk.Frame(self.root)
@@ -87,7 +95,7 @@ class ScalpBotGUI:
         self._build_log_panel(right)
         self._build_positions_panel(right)
 
-        # Bottom: signal display
+        # Bottom: signal
         bottom = ttk.Frame(self.root)
         bottom.pack(fill=tk.X, padx=10, pady=5)
         self._build_signal_bar(bottom)
@@ -113,7 +121,6 @@ class ScalpBotGUI:
         )
         self.btn_stop.pack(side=tk.LEFT, padx=5)
 
-        # Status labels
         self.lbl_connection = ttk.Label(frame, text="Deconnecte",
                                          style="Status.TLabel")
         self.lbl_connection.pack(side=tk.RIGHT, padx=5)
@@ -126,6 +133,20 @@ class ScalpBotGUI:
                                      style="Status.TLabel")
         self.lbl_equity.pack(side=tk.RIGHT, padx=5)
 
+        self.lbl_stats = ttk.Label(frame, text="W:0 L:0",
+                                    style="Status.TLabel")
+        self.lbl_stats.pack(side=tk.RIGHT, padx=5)
+
+    # ── State bar ────────────────────────────────────────────────
+
+    def _build_state_bar(self, parent):
+        frame = ttk.Frame(parent)
+        frame.pack(fill=tk.X)
+
+        ttk.Label(frame, text="Etat:").pack(side=tk.LEFT, padx=5)
+        self.lbl_state = ttk.Label(frame, text="IDLE", style="Status.TLabel")
+        self.lbl_state.pack(side=tk.LEFT, padx=5)
+
     # ── Parameters panel ─────────────────────────────────────────
 
     def _build_params_panel(self, parent):
@@ -135,48 +156,38 @@ class ScalpBotGUI:
         self.param_vars = {}
         params = [
             ("Symbole", "SYMBOL", self.config.SYMBOL),
-            ("Lot", "LOT_SIZE", str(self.config.LOT_SIZE)),
-            ("Max Positions", "MAX_POSITIONS", str(self.config.MAX_POSITIONS)),
-            ("Williams Periode", "WILLIAMS_PERIOD", str(self.config.WILLIAMS_PERIOD)),
+            ("Lot total", "LOT_SIZE", str(self.config.LOT_SIZE)),
+            ("Williams Per.", "WILLIAMS_PERIOD", str(self.config.WILLIAMS_PERIOD)),
             ("WR Survente", "WILLIAMS_OVERSOLD", str(self.config.WILLIAMS_OVERSOLD)),
             ("WR Surachat", "WILLIAMS_OVERBOUGHT", str(self.config.WILLIAMS_OVERBOUGHT)),
+            ("WR Zone M15", "WILLIAMS_CONFIRM_ZONE", str(self.config.WILLIAMS_CONFIRM_ZONE)),
             ("BB Periode", "BOLLINGER_PERIOD", str(self.config.BOLLINGER_PERIOD)),
             ("BB Ecart-type", "BOLLINGER_STD_DEV", str(self.config.BOLLINGER_STD_DEV)),
-            ("TP Ratio (R:R)", "TP_RR_RATIO", str(self.config.TP_RR_RATIO)),
-            ("Trailing Points", "TRAILING_STEP_POINTS", str(self.config.TRAILING_STEP_POINTS)),
+            ("SMA Periode", "SMA_PERIOD", str(self.config.SMA_PERIOD)),
+            ("SL Swing Bars", "SL_SWING_LOOKBACK", str(self.config.SL_SWING_LOOKBACK)),
+            ("SL Marge (pts)", "SL_MARGIN_POINTS", str(self.config.SL_MARGIN_POINTS)),
+            ("Max Spread", "MAX_SPREAD_POINTS", str(self.config.MAX_SPREAD_POINTS)),
+            ("Cooldown (sec)", "COOLDOWN_SECONDS", str(self.config.COOLDOWN_SECONDS)),
             ("Intervalle (sec)", "CHECK_INTERVAL_SECONDS", str(self.config.CHECK_INTERVAL_SECONDS)),
         ]
 
         for i, (label, key, default) in enumerate(params):
             ttk.Label(frame, text=label).grid(
-                row=i, column=0, sticky=tk.W, padx=5, pady=2
+                row=i, column=0, sticky=tk.W, padx=5, pady=1
             )
             var = tk.StringVar(value=default)
-            entry = ttk.Entry(frame, textvariable=var, width=14)
-            entry.grid(row=i, column=1, padx=5, pady=2)
+            entry = ttk.Entry(frame, textvariable=var, width=12)
+            entry.grid(row=i, column=1, padx=5, pady=1)
             self.param_vars[key] = var
 
-        # MTF mode
         row = len(params)
-        ttk.Label(frame, text="Mode MTF").grid(
-            row=row, column=0, sticky=tk.W, padx=5, pady=2
-        )
-        self.mtf_var = tk.StringVar(value=self.config.MTF_MODE)
-        combo = ttk.Combobox(
-            frame, textvariable=self.mtf_var,
-            values=["strict", "relaxed"], state="readonly", width=12
-        )
-        combo.grid(row=row + 1, column=1, padx=5, pady=2)
+        self.be_var = tk.BooleanVar(value=self.config.BREAKEVEN_AFTER_TP1)
+        cb = ttk.Checkbutton(frame, text="Breakeven apres TP1",
+                              variable=self.be_var)
+        cb.grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=5, pady=2)
 
-        # Trailing stop toggle
-        self.trailing_var = tk.BooleanVar(value=self.config.TRAILING_STOP)
-        cb = ttk.Checkbutton(frame, text="Trailing Stop",
-                              variable=self.trailing_var)
-        cb.grid(row=row + 1, column=0, columnspan=2, sticky=tk.W, padx=5, pady=2)
-
-        # Apply button
         btn = ttk.Button(frame, text="Appliquer", command=self._apply_params)
-        btn.grid(row=row + 2, column=0, columnspan=2, pady=5)
+        btn.grid(row=row + 1, column=0, columnspan=2, pady=5)
 
     # ── Indicators panel ─────────────────────────────────────────
 
@@ -187,39 +198,9 @@ class ScalpBotGUI:
         self.ind_labels = {}
         timeframes = [
             ("Entry", self.config.TIMEFRAME_ENTRY),
-            ("Mid", self.config.TIMEFRAME_MID),
-            ("High", self.config.TIMEFRAME_HIGH),
+            ("Confirm", self.config.TIMEFRAME_CONFIRM),
         ]
 
-        for col, (key, tf) in enumerate(timeframes):
-            ttk.Label(frame, text=tf, style="Header.TLabel").grid(
-                row=0, column=col, padx=8, pady=2
-            )
-
-            labels = {}
-            for row, name in enumerate(
-                ["Williams %R", "Close", "BB Upper", "BB Middle",
-                 "BB Lower", "Biais"], start=1
-            ):
-                ttk.Label(frame, text=name).grid(
-                    row=row, column=col if col == 0 else col,
-                    sticky=tk.W, padx=8, pady=1
-                )
-
-            # Value labels
-            val_labels = {}
-            for row, name in enumerate(
-                ["wr", "close", "bb_up", "bb_mid", "bb_low", "bias"], start=1
-            ):
-                lbl = ttk.Label(frame, text="---")
-                # Place values in a sub-grid: labels col*2, values col*2+1
-                lbl.grid(row=row, column=col, sticky=tk.E, padx=8, pady=1)
-                val_labels[name] = lbl
-
-            self.ind_labels[key] = val_labels
-
-        # Re-layout: use 6 columns (label+value per timeframe)
-        # Rebuild properly
         for w in frame.winfo_children():
             w.destroy()
 
@@ -227,17 +208,19 @@ class ScalpBotGUI:
         for col_idx, (key, tf) in enumerate(timeframes):
             c = col_idx * 2
             ttk.Label(frame, text=tf, style="Header.TLabel").grid(
-                row=0, column=c, columnspan=2, padx=5, pady=3
+                row=0, column=c, columnspan=2, padx=8, pady=3
             )
             val_labels = {}
-            for row, (name, display) in enumerate([
+            rows = [
                 ("wr", "W%R"),
                 ("close", "Close"),
                 ("bb_up", "BB Up"),
                 ("bb_mid", "BB Mid"),
                 ("bb_low", "BB Low"),
-                ("bias", "Biais"),
-            ], start=1):
+                ("sma", "SMA"),
+                ("sma_dir", "SMA Dir"),
+            ]
+            for row, (name, display) in enumerate(rows, start=1):
                 ttk.Label(frame, text=display).grid(
                     row=row, column=c, sticky=tk.W, padx=4, pady=1
                 )
@@ -292,7 +275,7 @@ class ScalpBotGUI:
         frame = ttk.Frame(parent)
         frame.pack(fill=tk.X)
 
-        ttk.Label(frame, text="Dernier Signal:").pack(side=tk.LEFT, padx=5)
+        ttk.Label(frame, text="Signal:").pack(side=tk.LEFT, padx=5)
         self.lbl_signal = ttk.Label(frame, text="Aucun", style="Status.TLabel")
         self.lbl_signal.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
@@ -323,17 +306,19 @@ class ScalpBotGUI:
         try:
             cfg.SYMBOL = self.param_vars["SYMBOL"].get().strip()
             cfg.LOT_SIZE = float(self.param_vars["LOT_SIZE"].get())
-            cfg.MAX_POSITIONS = int(self.param_vars["MAX_POSITIONS"].get())
             cfg.WILLIAMS_PERIOD = int(self.param_vars["WILLIAMS_PERIOD"].get())
             cfg.WILLIAMS_OVERSOLD = float(self.param_vars["WILLIAMS_OVERSOLD"].get())
             cfg.WILLIAMS_OVERBOUGHT = float(self.param_vars["WILLIAMS_OVERBOUGHT"].get())
+            cfg.WILLIAMS_CONFIRM_ZONE = float(self.param_vars["WILLIAMS_CONFIRM_ZONE"].get())
             cfg.BOLLINGER_PERIOD = int(self.param_vars["BOLLINGER_PERIOD"].get())
             cfg.BOLLINGER_STD_DEV = float(self.param_vars["BOLLINGER_STD_DEV"].get())
-            cfg.TP_RR_RATIO = float(self.param_vars["TP_RR_RATIO"].get())
-            cfg.TRAILING_STEP_POINTS = int(self.param_vars["TRAILING_STEP_POINTS"].get())
+            cfg.SMA_PERIOD = int(self.param_vars["SMA_PERIOD"].get())
+            cfg.SL_SWING_LOOKBACK = int(self.param_vars["SL_SWING_LOOKBACK"].get())
+            cfg.SL_MARGIN_POINTS = int(self.param_vars["SL_MARGIN_POINTS"].get())
+            cfg.MAX_SPREAD_POINTS = int(self.param_vars["MAX_SPREAD_POINTS"].get())
+            cfg.COOLDOWN_SECONDS = int(self.param_vars["COOLDOWN_SECONDS"].get())
             cfg.CHECK_INTERVAL_SECONDS = int(self.param_vars["CHECK_INTERVAL_SECONDS"].get())
-            cfg.MTF_MODE = self.mtf_var.get()
-            cfg.TRAILING_STOP = self.trailing_var.get()
+            cfg.BREAKEVEN_AFTER_TP1 = self.be_var.get()
             self._append_log("Parametres mis a jour")
         except ValueError as e:
             messagebox.showwarning("Parametre invalide", str(e))
@@ -347,21 +332,45 @@ class ScalpBotGUI:
     def _update_signal(self, signal):
         if signal.direction == "NONE":
             self.lbl_signal.config(
-                text=f"Pas de signal | {signal.reason}",
+                text=signal.reason or "Pas de signal",
                 style="Status.TLabel"
             )
         elif signal.direction == "BUY":
             self.lbl_signal.config(
-                text=f"BUY @ {signal.entry_price:.5f} | "
-                     f"SL={signal.sl:.5f} TP={signal.tp:.5f} | {signal.reason}",
+                text=(
+                    f"BUY @ {signal.entry_price:.5f} | "
+                    f"SL={signal.sl:.5f} | "
+                    f"TP1={signal.tp1:.5f} TP2={signal.tp2:.5f} TP3={signal.tp3:.5f}"
+                ),
                 style="Buy.TLabel"
             )
         else:
             self.lbl_signal.config(
-                text=f"SELL @ {signal.entry_price:.5f} | "
-                     f"SL={signal.sl:.5f} TP={signal.tp:.5f} | {signal.reason}",
+                text=(
+                    f"SELL @ {signal.entry_price:.5f} | "
+                    f"SL={signal.sl:.5f} | "
+                    f"TP1={signal.tp1:.5f} TP2={signal.tp2:.5f} TP3={signal.tp3:.5f}"
+                ),
                 style="Sell.TLabel"
             )
+
+    def _update_state(self, state_str: str):
+        state_styles = {
+            "IDLE": "Status.TLabel",
+            "WATCHING_BUY": "Watch.TLabel",
+            "WATCHING_SELL": "Watch.TLabel",
+            "IN_POSITION": "Buy.TLabel",
+        }
+        state_labels = {
+            "IDLE": "IDLE - En attente de setup",
+            "WATCHING_BUY": "WATCHING BUY - Attente reintegration WR",
+            "WATCHING_SELL": "WATCHING SELL - Attente reintegration WR",
+            "IN_POSITION": "EN POSITION",
+        }
+        self.lbl_state.config(
+            text=state_labels.get(state_str, state_str),
+            style=state_styles.get(state_str, "Status.TLabel"),
+        )
 
     def _update_status(self, info: dict):
         self.lbl_balance.config(
@@ -370,9 +379,12 @@ class ScalpBotGUI:
         self.lbl_equity.config(
             text=f"Equity: {info['equity']:.2f}"
         )
+        self.lbl_stats.config(
+            text=f"Trades:{info.get('total_trades', 0)} "
+                 f"W:{info.get('winning', 0)} L:{info.get('losing', 0)}"
+        )
 
     def _update_positions(self, positions: list):
-        # Clear existing
         for item in self.pos_tree.get_children():
             self.pos_tree.delete(item)
 
@@ -397,14 +409,12 @@ class ScalpBotGUI:
             labels["bb_up"].config(text=f"{values['bb_upper']:.5f}")
             labels["bb_mid"].config(text=f"{values['bb_middle']:.5f}")
             labels["bb_low"].config(text=f"{values['bb_lower']:.5f}")
+            labels["sma"].config(text=f"{values['sma_value']:.5f}")
 
-            bias = values["bias"]
-            if bias == "BULLISH":
-                labels["bias"].config(text="HAUSSIER", style="Buy.TLabel")
-            elif bias == "BEARISH":
-                labels["bias"].config(text="BAISSIER", style="Sell.TLabel")
+            if values["sma_rising"]:
+                labels["sma_dir"].config(text="HAUSSE", style="Buy.TLabel")
             else:
-                labels["bias"].config(text="NEUTRE", style="TLabel")
+                labels["sma_dir"].config(text="BAISSE", style="Sell.TLabel")
 
     def run(self):
         """Start the Tkinter main loop."""

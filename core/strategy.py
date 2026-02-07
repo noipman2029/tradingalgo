@@ -1,31 +1,47 @@
 """
 Multi-timeframe scalping strategy engine.
 
-Entry signals from M3 (Williams %R + Bollinger Bands),
-confirmed by M15 and H1 trend filters.
+Logic (example for BUY):
+  1. M3: Price goes below lower Bollinger Band AND Williams %R < -80
+  2. M3: Wait for Williams %R to reintegrate above -80 (confirmation of bounce)
+  3. M15: Williams %R is near oversold zone AND SMA is rising (trend filter)
+  4. Entry with 3 TPs spread across the Bollinger range
+
+Mirror logic for SELL.
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 
 import pandas as pd
 
-from core.indicators import compute_all_indicators
+from core.indicators import compute_all_indicators, sma_slope
 
 logger = logging.getLogger(__name__)
 
 
+class SetupState(Enum):
+    """State machine for the entry setup."""
+    IDLE = "IDLE"                    # No setup detected
+    WATCHING_BUY = "WATCHING_BUY"    # WR was < -80 & below BB, waiting reintegration
+    WATCHING_SELL = "WATCHING_SELL"   # WR was > -20 & above BB, waiting reintegration
+    IN_POSITION = "IN_POSITION"      # Trade active
+
+
 @dataclass
 class Signal:
-    direction: str  # "BUY", "SELL", or "NONE"
+    direction: str         # "BUY", "SELL", or "NONE"
     entry_price: float
     sl: float
-    tp: float
+    tp1: float
+    tp2: float
+    tp3: float
     reason: str
 
 
 @dataclass
-class TimeframeAnalysis:
+class TimeframeSnapshot:
     """Indicator snapshot for a single timeframe."""
     timeframe: str
     williams_r: float
@@ -33,213 +49,360 @@ class TimeframeAnalysis:
     bb_upper: float
     bb_middle: float
     bb_lower: float
-    bb_bandwidth: float
-    bias: str  # "BULLISH", "BEARISH", "NEUTRAL"
-
-
-def analyze_timeframe(
-    df: pd.DataFrame,
-    timeframe: str,
-    williams_period: int,
-    bb_period: int,
-    bb_std: float,
-    wr_oversold: float,
-    wr_overbought: float,
-) -> TimeframeAnalysis | None:
-    """Compute indicators and determine bias for one timeframe."""
-    if df is None or len(df) < max(williams_period, bb_period) + 5:
-        return None
-
-    data = compute_all_indicators(df, williams_period, bb_period, bb_std)
-    last = data.iloc[-1]
-
-    wr = last["williams_r"]
-    close = last["close"]
-    bb_upper = last["bb_upper"]
-    bb_middle = last["bb_middle"]
-    bb_lower = last["bb_lower"]
-    bw = last["bb_bandwidth"]
-
-    # Determine bias
-    if wr < wr_oversold and close <= bb_lower:
-        bias = "BULLISH"  # Oversold + at lower band = expect bounce up
-    elif wr > wr_overbought and close >= bb_upper:
-        bias = "BEARISH"  # Overbought + at upper band = expect drop
-    elif close > bb_middle and wr > -50:
-        bias = "BULLISH"
-    elif close < bb_middle and wr < -50:
-        bias = "BEARISH"
-    else:
-        bias = "NEUTRAL"
-
-    return TimeframeAnalysis(
-        timeframe=timeframe,
-        williams_r=wr,
-        close=close,
-        bb_upper=bb_upper,
-        bb_middle=bb_middle,
-        bb_lower=bb_lower,
-        bb_bandwidth=bw,
-        bias=bias,
-    )
+    sma_value: float
+    sma_rising: bool       # True if SMA slope > 0
 
 
 class ScalpingStrategy:
     """
-    Multi-timeframe scalping strategy.
+    Multi-timeframe scalping strategy with reintegration logic.
 
-    Entry on M3 when:
-      BUY:  Williams %R < oversold AND close touches/crosses lower Bollinger Band
-      SELL: Williams %R > overbought AND close touches/crosses upper Bollinger Band
-
-    Confirmation from higher timeframes (M15 / H1):
-      - strict mode: both must confirm
-      - relaxed mode: at least one must confirm
+    State machine flow (BUY example):
+      IDLE -> price < BB lower AND WR < -80 -> WATCHING_BUY
+      WATCHING_BUY -> WR crosses back above -80 + M15 confirms -> SIGNAL BUY
+      WATCHING_BUY -> price moves too far from BB / timeout -> IDLE (setup invalidated)
     """
 
     def __init__(self, config):
         self.config = config
+        self.state = SetupState.IDLE
+        self._setup_entry_wr = None   # WR value when setup was first detected
+
+        # For GUI display
+        self.last_entry: TimeframeSnapshot | None = None
+        self.last_confirm: TimeframeSnapshot | None = None
+
+    def reset(self):
+        """Reset the state machine (e.g. after a trade closes)."""
+        self.state = SetupState.IDLE
+        self._setup_entry_wr = None
 
     def evaluate(
         self,
         df_entry: pd.DataFrame,
-        df_mid: pd.DataFrame,
-        df_high: pd.DataFrame,
+        df_confirm: pd.DataFrame,
     ) -> Signal:
         """
-        Evaluate all timeframes and return a trading signal.
+        Evaluate the strategy and return a signal.
+        Called every tick interval by the bot engine.
         """
         cfg = self.config
+        no_signal = Signal("NONE", 0, 0, 0, 0, 0, "")
 
-        # Analyze each timeframe
-        entry_analysis = analyze_timeframe(
-            df_entry, cfg.TIMEFRAME_ENTRY,
-            cfg.WILLIAMS_PERIOD, cfg.BOLLINGER_PERIOD, cfg.BOLLINGER_STD_DEV,
-            cfg.WILLIAMS_OVERSOLD, cfg.WILLIAMS_OVERBOUGHT,
-        )
-        mid_analysis = analyze_timeframe(
-            df_mid, cfg.TIMEFRAME_MID,
-            cfg.WILLIAMS_PERIOD, cfg.BOLLINGER_PERIOD, cfg.BOLLINGER_STD_DEV,
-            cfg.WILLIAMS_OVERSOLD, cfg.WILLIAMS_OVERBOUGHT,
-        )
-        high_analysis = analyze_timeframe(
-            df_high, cfg.TIMEFRAME_HIGH,
-            cfg.WILLIAMS_PERIOD, cfg.BOLLINGER_PERIOD, cfg.BOLLINGER_STD_DEV,
-            cfg.WILLIAMS_OVERSOLD, cfg.WILLIAMS_OVERBOUGHT,
-        )
+        # Compute indicators on M3
+        entry_data = self._analyze(df_entry, cfg.TIMEFRAME_ENTRY)
+        if entry_data is None:
+            return Signal("NONE", 0, 0, 0, 0, 0, "Donnees M3 insuffisantes")
+        self.last_entry = entry_data
 
-        if entry_analysis is None:
-            return Signal("NONE", 0, 0, 0, "Insufficient entry TF data")
+        # Compute indicators on M15
+        confirm_data = self._analyze(df_confirm, cfg.TIMEFRAME_CONFIRM)
+        self.last_confirm = confirm_data
 
-        # Store last analysis for GUI display
-        self.last_entry = entry_analysis
-        self.last_mid = mid_analysis
-        self.last_high = high_analysis
+        wr = entry_data.williams_r
+        close = entry_data.close
 
-        # Check entry conditions on M3
-        entry_dir = self._check_entry_signal(entry_analysis)
-        if entry_dir == "NONE":
-            return Signal("NONE", 0, 0, 0, "No entry signal on M3")
+        # ── State machine ────────────────────────────────────────
 
-        # Check higher-timeframe confirmation
-        confirmed, reason = self._check_htf_confirmation(
-            entry_dir, mid_analysis, high_analysis
-        )
+        if self.state == SetupState.IDLE:
+            return self._check_setup(entry_data, cfg)
+
+        elif self.state == SetupState.WATCHING_BUY:
+            return self._check_reintegration_buy(
+                entry_data, confirm_data, df_entry, cfg
+            )
+
+        elif self.state == SetupState.WATCHING_SELL:
+            return self._check_reintegration_sell(
+                entry_data, confirm_data, df_entry, cfg
+            )
+
+        elif self.state == SetupState.IN_POSITION:
+            # Do nothing, managed by bot engine
+            return Signal("NONE", 0, 0, 0, 0, 0, "En position")
+
+        return no_signal
+
+    # ── Step 1: Detect initial setup ──────────────────────────────
+
+    def _check_setup(self, entry: TimeframeSnapshot, cfg) -> Signal:
+        """Look for price below BB + WR oversold (or mirror for sell)."""
+        wr = entry.williams_r
+        close = entry.close
+
+        # BUY setup: price at/below lower BB AND WR in oversold zone
+        if close <= entry.bb_lower and wr < cfg.WILLIAMS_OVERSOLD:
+            self.state = SetupState.WATCHING_BUY
+            self._setup_entry_wr = wr
+            logger.info(
+                "Setup BUY detecte: close=%.5f <= BB_low=%.5f, WR=%.1f",
+                close, entry.bb_lower, wr,
+            )
+            return Signal(
+                "NONE", 0, 0, 0, 0, 0,
+                f"SETUP BUY detecte | WR={wr:.1f} | Attente reintegration..."
+            )
+
+        # SELL setup: price at/above upper BB AND WR in overbought zone
+        if close >= entry.bb_upper and wr > cfg.WILLIAMS_OVERBOUGHT:
+            self.state = SetupState.WATCHING_SELL
+            self._setup_entry_wr = wr
+            logger.info(
+                "Setup SELL detecte: close=%.5f >= BB_up=%.5f, WR=%.1f",
+                close, entry.bb_upper, wr,
+            )
+            return Signal(
+                "NONE", 0, 0, 0, 0, 0,
+                f"SETUP SELL detecte | WR={wr:.1f} | Attente reintegration..."
+            )
+
+        return Signal("NONE", 0, 0, 0, 0, 0, "Pas de setup")
+
+    # ── Step 2: Wait for WR reintegration + M15 confirm ───────────
+
+    def _check_reintegration_buy(
+        self,
+        entry: TimeframeSnapshot,
+        confirm: TimeframeSnapshot | None,
+        df_entry: pd.DataFrame,
+        cfg,
+    ) -> Signal:
+        """
+        BUY: Wait for WR to cross back above -80.
+        If it does, check M15 confirmation then enter.
+        """
+        wr = entry.williams_r
+
+        # Invalidate if price went too far above BB middle (setup expired)
+        if entry.close > entry.bb_middle:
+            self.state = SetupState.IDLE
+            return Signal(
+                "NONE", 0, 0, 0, 0, 0,
+                "Setup BUY invalide: prix au-dessus de BB middle"
+            )
+
+        # WR has NOT yet reintegrated
+        if wr < cfg.WILLIAMS_OVERSOLD:
+            return Signal(
+                "NONE", 0, 0, 0, 0, 0,
+                f"SETUP BUY actif | WR={wr:.1f} < {cfg.WILLIAMS_OVERSOLD} | "
+                f"Attente reintegration..."
+            )
+
+        # WR has crossed back above -80 -> check M15 confirmation
+        confirmed, reason = self._check_m15_buy(confirm, cfg)
         if not confirmed:
-            return Signal("NONE", 0, 0, 0, reason)
+            # Still keep watching - M15 might align on next tick
+            return Signal("NONE", 0, 0, 0, 0, 0,
+                          f"Reintegration WR OK | M15: {reason}")
 
-        # Calculate SL/TP
-        sl, tp = self._calculate_sl_tp(entry_analysis, entry_dir)
+        # All conditions met -> generate BUY signal
+        sl = self._compute_sl_buy(df_entry, entry, cfg)
+        tp1, tp2, tp3 = self._compute_tps_buy(entry)
 
-        reason_parts = [
-            f"{entry_dir} signal on {cfg.TIMEFRAME_ENTRY}",
-            f"WR={entry_analysis.williams_r:.1f}",
-        ]
-        if mid_analysis:
-            reason_parts.append(f"{cfg.TIMEFRAME_MID} bias={mid_analysis.bias}")
-        if high_analysis:
-            reason_parts.append(f"{cfg.TIMEFRAME_HIGH} bias={high_analysis.bias}")
+        self.state = SetupState.IN_POSITION
 
         return Signal(
-            direction=entry_dir,
-            entry_price=entry_analysis.close,
+            direction="BUY",
+            entry_price=entry.close,
             sl=sl,
-            tp=tp,
-            reason=" | ".join(reason_parts),
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            reason=(
+                f"BUY M3 | WR reintegre={wr:.1f} | "
+                f"M15 WR={confirm.williams_r:.1f} SMA {'UP' if confirm.sma_rising else 'DOWN'}"
+            ),
         )
 
-    def _check_entry_signal(self, analysis: TimeframeAnalysis) -> str:
-        """Check if M3 has a valid entry signal."""
-        cfg = self.config
-        wr = analysis.williams_r
-
-        # BUY: oversold + price at/below lower band
-        if wr < cfg.WILLIAMS_OVERSOLD and analysis.close <= analysis.bb_lower:
-            return "BUY"
-
-        # SELL: overbought + price at/above upper band
-        if wr > cfg.WILLIAMS_OVERBOUGHT and analysis.close >= analysis.bb_upper:
-            return "SELL"
-
-        return "NONE"
-
-    def _check_htf_confirmation(
+    def _check_reintegration_sell(
         self,
-        direction: str,
-        mid: TimeframeAnalysis | None,
-        high: TimeframeAnalysis | None,
+        entry: TimeframeSnapshot,
+        confirm: TimeframeSnapshot | None,
+        df_entry: pd.DataFrame,
+        cfg,
+    ) -> Signal:
+        """
+        SELL: Wait for WR to cross back below -20.
+        If it does, check M15 confirmation then enter.
+        """
+        wr = entry.williams_r
+
+        # Invalidate if price went too far below BB middle
+        if entry.close < entry.bb_middle:
+            self.state = SetupState.IDLE
+            return Signal(
+                "NONE", 0, 0, 0, 0, 0,
+                "Setup SELL invalide: prix en-dessous de BB middle"
+            )
+
+        # WR has NOT yet reintegrated
+        if wr > cfg.WILLIAMS_OVERBOUGHT:
+            return Signal(
+                "NONE", 0, 0, 0, 0, 0,
+                f"SETUP SELL actif | WR={wr:.1f} > {cfg.WILLIAMS_OVERBOUGHT} | "
+                f"Attente reintegration..."
+            )
+
+        # WR crossed back below -20 -> check M15
+        confirmed, reason = self._check_m15_sell(confirm, cfg)
+        if not confirmed:
+            return Signal("NONE", 0, 0, 0, 0, 0,
+                          f"Reintegration WR OK | M15: {reason}")
+
+        sl = self._compute_sl_sell(df_entry, entry, cfg)
+        tp1, tp2, tp3 = self._compute_tps_sell(entry)
+
+        self.state = SetupState.IN_POSITION
+
+        return Signal(
+            direction="SELL",
+            entry_price=entry.close,
+            sl=sl,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            reason=(
+                f"SELL M3 | WR reintegre={wr:.1f} | "
+                f"M15 WR={confirm.williams_r:.1f} SMA {'DOWN' if not confirm.sma_rising else 'UP'}"
+            ),
+        )
+
+    # ── M15 Confirmation ─────────────────────────────────────────
+
+    def _check_m15_buy(
+        self, confirm: TimeframeSnapshot | None, cfg
     ) -> tuple[bool, str]:
-        """Check if higher timeframes confirm the entry direction."""
+        """
+        M15 must confirm BUY:
+          1. WR is near oversold zone (< oversold + confirm_zone)
+          2. SMA is rising (trend not bearish)
+        """
+        if confirm is None:
+            return False, "Donnees M15 indisponibles"
+
+        wr_threshold = cfg.WILLIAMS_OVERSOLD + cfg.WILLIAMS_CONFIRM_ZONE
+        if confirm.williams_r > wr_threshold:
+            return False, (
+                f"WR M15={confirm.williams_r:.1f} trop haut "
+                f"(seuil={wr_threshold:.0f})"
+            )
+
+        if not confirm.sma_rising:
+            return False, "SMA M15 descendante (contre-tendance)"
+
+        return True, "OK"
+
+    def _check_m15_sell(
+        self, confirm: TimeframeSnapshot | None, cfg
+    ) -> tuple[bool, str]:
+        """
+        M15 must confirm SELL:
+          1. WR is near overbought zone (> overbought - confirm_zone)
+          2. SMA is falling (trend not bullish)
+        """
+        if confirm is None:
+            return False, "Donnees M15 indisponibles"
+
+        wr_threshold = cfg.WILLIAMS_OVERBOUGHT - cfg.WILLIAMS_CONFIRM_ZONE
+        if confirm.williams_r < wr_threshold:
+            return False, (
+                f"WR M15={confirm.williams_r:.1f} trop bas "
+                f"(seuil={wr_threshold:.0f})"
+            )
+
+        if confirm.sma_rising:
+            return False, "SMA M15 croissante (contre-tendance)"
+
+        return True, "OK"
+
+    # ── SL Calculation: Swing Low/High ────────────────────────────
+
+    def _compute_sl_buy(
+        self, df: pd.DataFrame, entry: TimeframeSnapshot, cfg
+    ) -> float:
+        """SL = recent swing low - margin."""
+        lookback = min(cfg.SL_SWING_LOOKBACK, len(df) - 1)
+        recent_lows = df["low"].iloc[-lookback:]
+        swing_low = float(recent_lows.min())
+
+        # Get point value for margin
+        margin = cfg.SL_MARGIN_POINTS * 0.00001  # Approximate for forex
+        sl = swing_low - margin
+        return round(sl, 6)
+
+    def _compute_sl_sell(
+        self, df: pd.DataFrame, entry: TimeframeSnapshot, cfg
+    ) -> float:
+        """SL = recent swing high + margin."""
+        lookback = min(cfg.SL_SWING_LOOKBACK, len(df) - 1)
+        recent_highs = df["high"].iloc[-lookback:]
+        swing_high = float(recent_highs.max())
+
+        margin = cfg.SL_MARGIN_POINTS * 0.00001
+        sl = swing_high + margin
+        return round(sl, 6)
+
+    # ── TP Calculation: 3 levels across BB range ──────────────────
+
+    def _compute_tps_buy(
+        self, entry: TimeframeSnapshot
+    ) -> tuple[float, float, float]:
+        """
+        BUY TPs spread from entry to BB upper:
+          TP1 = BB middle (33% of the distance, quick profit)
+          TP2 = 75% of distance to BB upper
+          TP3 = BB upper (full target)
+        """
+        tp1 = entry.bb_middle
+        distance = entry.bb_upper - entry.close
+        tp2 = entry.close + distance * 0.75
+        tp3 = entry.bb_upper
+        return round(tp1, 6), round(tp2, 6), round(tp3, 6)
+
+    def _compute_tps_sell(
+        self, entry: TimeframeSnapshot
+    ) -> tuple[float, float, float]:
+        """
+        SELL TPs spread from entry to BB lower:
+          TP1 = BB middle
+          TP2 = 75% of distance to BB lower
+          TP3 = BB lower (full target)
+        """
+        tp1 = entry.bb_middle
+        distance = entry.close - entry.bb_lower
+        tp2 = entry.close - distance * 0.75
+        tp3 = entry.bb_lower
+        return round(tp1, 6), round(tp2, 6), round(tp3, 6)
+
+    # ── Analyze a timeframe ───────────────────────────────────────
+
+    def _analyze(
+        self, df: pd.DataFrame, timeframe: str
+    ) -> TimeframeSnapshot | None:
+        """Compute indicators and return a snapshot."""
         cfg = self.config
+        min_bars = max(cfg.WILLIAMS_PERIOD, cfg.BOLLINGER_PERIOD,
+                       cfg.SMA_PERIOD) + 5
 
-        required_bias = "BULLISH" if direction == "BUY" else "BEARISH"
+        if df is None or len(df) < min_bars:
+            return None
 
-        mid_ok = mid is not None and mid.bias in (required_bias, "NEUTRAL")
-        high_ok = high is not None and high.bias in (required_bias, "NEUTRAL")
+        data = compute_all_indicators(
+            df, cfg.WILLIAMS_PERIOD, cfg.BOLLINGER_PERIOD,
+            cfg.BOLLINGER_STD_DEV, cfg.SMA_PERIOD,
+        )
+        last = data.iloc[-1]
 
-        if mid is None and high is None:
-            return False, "No HTF data available"
+        slope = sma_slope(data["sma"], cfg.SMA_LOOKBACK)
 
-        if cfg.MTF_MODE == "strict":
-            # Both must confirm (if data available)
-            if mid is not None and not mid_ok:
-                return False, (
-                    f"{cfg.TIMEFRAME_MID} bias={mid.bias} "
-                    f"contradicts {direction}"
-                )
-            if high is not None and not high_ok:
-                return False, (
-                    f"{cfg.TIMEFRAME_HIGH} bias={high.bias} "
-                    f"contradicts {direction}"
-                )
-            return True, "HTF confirmed (strict)"
-        else:
-            # At least one must confirm
-            if mid_ok or high_ok:
-                return True, "HTF confirmed (relaxed)"
-            return False, "No HTF confirmation (relaxed mode)"
-
-    def _calculate_sl_tp(
-        self, analysis: TimeframeAnalysis, direction: str
-    ) -> tuple[float, float]:
-        """Calculate stop loss and take profit levels."""
-        cfg = self.config
-
-        if cfg.USE_BOLLINGER_SL:
-            # SL based on Bollinger band distance
-            band_width = analysis.bb_upper - analysis.bb_lower
-            sl_distance = band_width / 2.0
-        else:
-            # Fallback: fixed distance based on bandwidth as proxy for volatility
-            sl_distance = analysis.bb_bandwidth * analysis.close / 10000.0
-
-        tp_distance = sl_distance * cfg.TP_RR_RATIO
-
-        if direction == "BUY":
-            sl = analysis.close - sl_distance
-            tp = analysis.close + tp_distance
-        else:
-            sl = analysis.close + sl_distance
-            tp = analysis.close - tp_distance
-
-        return round(sl, 6), round(tp, 6)
+        return TimeframeSnapshot(
+            timeframe=timeframe,
+            williams_r=last["williams_r"],
+            close=last["close"],
+            bb_upper=last["bb_upper"],
+            bb_middle=last["bb_middle"],
+            bb_lower=last["bb_lower"],
+            sma_value=last["sma"],
+            sma_rising=slope > 0,
+        )
