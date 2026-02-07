@@ -186,8 +186,18 @@ class ScalpBotGUI:
                               variable=self.be_var)
         cb.grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=5, pady=2)
 
+        self.ignore_spread_var = tk.BooleanVar(value=self.config.IGNORE_SPREAD)
+        cb_spread = ttk.Checkbutton(frame, text="Ignorer le spread",
+                                     variable=self.ignore_spread_var)
+        cb_spread.grid(row=row + 1, column=0, columnspan=2, sticky=tk.W, padx=5, pady=2)
+
+        self.ignore_m15_var = tk.BooleanVar(value=self.config.IGNORE_M15)
+        cb_m15 = ttk.Checkbutton(frame, text="Ignorer M15 (M3 seul)",
+                                  variable=self.ignore_m15_var)
+        cb_m15.grid(row=row + 2, column=0, columnspan=2, sticky=tk.W, padx=5, pady=2)
+
         btn = ttk.Button(frame, text="Appliquer", command=self._apply_params)
-        btn.grid(row=row + 1, column=0, columnspan=2, pady=5)
+        btn.grid(row=row + 3, column=0, columnspan=2, pady=5)
 
     # ── Indicators panel ─────────────────────────────────────────
 
@@ -319,6 +329,8 @@ class ScalpBotGUI:
             cfg.COOLDOWN_SECONDS = int(self.param_vars["COOLDOWN_SECONDS"].get())
             cfg.CHECK_INTERVAL_SECONDS = int(self.param_vars["CHECK_INTERVAL_SECONDS"].get())
             cfg.BREAKEVEN_AFTER_TP1 = self.be_var.get()
+            cfg.IGNORE_SPREAD = self.ignore_spread_var.get()
+            cfg.IGNORE_M15 = self.ignore_m15_var.get()
             self._append_log("Parametres mis a jour")
         except ValueError as e:
             messagebox.showwarning("Parametre invalide", str(e))

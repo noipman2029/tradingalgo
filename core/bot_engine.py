@@ -151,9 +151,12 @@ class BotEngine:
         df_entry = self.connector.get_candles(
             cfg.SYMBOL, cfg.TIMEFRAME_ENTRY, cfg.CANDLES_COUNT
         )
-        df_confirm = self.connector.get_candles(
-            cfg.SYMBOL, cfg.TIMEFRAME_CONFIRM, cfg.CANDLES_COUNT
-        )
+        if cfg.IGNORE_M15:
+            df_confirm = None
+        else:
+            df_confirm = self.connector.get_candles(
+                cfg.SYMBOL, cfg.TIMEFRAME_CONFIRM, cfg.CANDLES_COUNT
+            )
 
         if df_entry is None:
             self._log("Pas de donnees pour le timeframe d'entree")
@@ -180,14 +183,15 @@ class BotEngine:
         self._log(f"SIGNAL: {signal.direction} | {signal.reason}")
 
         # Spread filter
-        sym_info = self.connector.get_symbol_info(cfg.SYMBOL)
-        if sym_info and sym_info["spread"] > cfg.MAX_SPREAD_POINTS:
-            self._log(
-                f"Spread trop eleve: {sym_info['spread']} > {cfg.MAX_SPREAD_POINTS} | "
-                f"Signal ignore"
-            )
-            self.strategy.reset()
-            return
+        if not cfg.IGNORE_SPREAD:
+            sym_info = self.connector.get_symbol_info(cfg.SYMBOL)
+            if sym_info and sym_info["spread"] > cfg.MAX_SPREAD_POINTS:
+                self._log(
+                    f"Spread trop eleve: {sym_info['spread']} > {cfg.MAX_SPREAD_POINTS} | "
+                    f"Signal ignore"
+                )
+                self.strategy.reset()
+                return
 
         # Cooldown check
         if self._last_loss_time > 0:

@@ -36,7 +36,9 @@ SL_SWING_LOOKBACK = 10        # Bars to look back for swing low/high for SL
 SL_MARGIN_POINTS = 30         # Extra margin below/above swing for SL (in points)
 BREAKEVEN_AFTER_TP1 = True    # Move SL to entry after TP1 hit
 MAX_SPREAD_POINTS = 30        # Max spread allowed to enter a trade
+IGNORE_SPREAD = False         # If True, spread filter is disabled
 COOLDOWN_SECONDS = 120        # Wait time after a losing trade
+IGNORE_M15 = False            # If True, M15 confirmation is skipped (M3 only)
 
 # --- Bot Behavior ---
 CHECK_INTERVAL_SECONDS = 5    # How often to check for signals

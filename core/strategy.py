@@ -190,7 +190,10 @@ class ScalpingStrategy:
             )
 
         # WR has crossed back above -80 -> check M15 confirmation
-        confirmed, reason = self._check_m15_buy(confirm, cfg)
+        if cfg.IGNORE_M15:
+            confirmed, reason = True, "M15 ignore (desactive)"
+        else:
+            confirmed, reason = self._check_m15_buy(confirm, cfg)
         if not confirmed:
             # Still keep watching - M15 might align on next tick
             return Signal("NONE", 0, 0, 0, 0, 0,
@@ -202,6 +205,10 @@ class ScalpingStrategy:
 
         self.state = SetupState.IN_POSITION
 
+        m15_info = "M15 ignore" if cfg.IGNORE_M15 else (
+            f"M15 WR={confirm.williams_r:.1f} SMA {'UP' if confirm.sma_rising else 'DOWN'}"
+            if confirm else "M15 N/A"
+        )
         return Signal(
             direction="BUY",
             entry_price=entry.close,
@@ -209,10 +216,7 @@ class ScalpingStrategy:
             tp1=tp1,
             tp2=tp2,
             tp3=tp3,
-            reason=(
-                f"BUY M3 | WR reintegre={wr:.1f} | "
-                f"M15 WR={confirm.williams_r:.1f} SMA {'UP' if confirm.sma_rising else 'DOWN'}"
-            ),
+            reason=f"BUY M3 | WR reintegre={wr:.1f} | {m15_info}",
         )
 
     def _check_reintegration_sell(
@@ -245,7 +249,10 @@ class ScalpingStrategy:
             )
 
         # WR crossed back below -20 -> check M15
-        confirmed, reason = self._check_m15_sell(confirm, cfg)
+        if cfg.IGNORE_M15:
+            confirmed, reason = True, "M15 ignore (desactive)"
+        else:
+            confirmed, reason = self._check_m15_sell(confirm, cfg)
         if not confirmed:
             return Signal("NONE", 0, 0, 0, 0, 0,
                           f"Reintegration WR OK | M15: {reason}")
@@ -255,6 +262,10 @@ class ScalpingStrategy:
 
         self.state = SetupState.IN_POSITION
 
+        m15_info = "M15 ignore" if cfg.IGNORE_M15 else (
+            f"M15 WR={confirm.williams_r:.1f} SMA {'DOWN' if not confirm.sma_rising else 'UP'}"
+            if confirm else "M15 N/A"
+        )
         return Signal(
             direction="SELL",
             entry_price=entry.close,
@@ -262,10 +273,7 @@ class ScalpingStrategy:
             tp1=tp1,
             tp2=tp2,
             tp3=tp3,
-            reason=(
-                f"SELL M3 | WR reintegre={wr:.1f} | "
-                f"M15 WR={confirm.williams_r:.1f} SMA {'DOWN' if not confirm.sma_rising else 'UP'}"
-            ),
+            reason=f"SELL M3 | WR reintegre={wr:.1f} | {m15_info}",
         )
 
     # ── M15 Confirmation ─────────────────────────────────────────
