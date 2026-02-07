@@ -64,6 +64,7 @@ class BotEngine:
         self.on_positions = None    # (list[dict]) -> None
         self.on_indicators = None   # (dict) -> None
         self.on_state = None        # (str) -> None
+        self.on_chart_data = None   # (pd.DataFrame) -> None
 
         # Stats
         self.total_trades = 0
@@ -165,9 +166,11 @@ class BotEngine:
         # Evaluate strategy
         signal = self.strategy.evaluate(df_entry, df_confirm)
 
-        # Publish indicators to GUI
+        # Publish indicators and chart data to GUI
         self._publish_indicators()
         self._publish_status()
+        if self.on_chart_data:
+            self.on_chart_data(df_entry)
 
         if self.on_signal:
             self.on_signal(signal)

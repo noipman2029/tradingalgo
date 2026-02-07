@@ -1,11 +1,13 @@
 """
 Tkinter GUI for the MT5 Scalping Bot.
-Displays strategy state machine, real-time indicators (WR, BB, SMA),
-3-TP levels, trade log, positions, and parameter tuning.
+Two tabs: Dashboard (controls, indicators, log, positions)
+and Graphique (live candlestick chart with BB, WR, trade levels).
 """
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
+
+from gui.chart import ChartPanel
 
 
 class ScalpBotGUI:
@@ -17,7 +19,7 @@ class ScalpBotGUI:
 
         self.root = tk.Tk()
         self.root.title("MT5 Scalping Bot - WR Reintegration + BB + SMA")
-        self.root.geometry("1100x800")
+        self.root.geometry("1200x850")
         self.root.resizable(True, True)
         self.root.configure(bg="#1e1e2e")
 
@@ -32,6 +34,7 @@ class ScalpBotGUI:
         self.engine.on_positions = lambda p: self.root.after(0, self._update_positions, p)
         self.engine.on_indicators = lambda d: self.root.after(0, self._update_indicators, d)
         self.engine.on_state = lambda s: self.root.after(0, self._update_state, s)
+        self.engine.on_chart_data = lambda d: self.root.after(0, self._update_chart, d)
 
         self._build_ui()
 
@@ -67,9 +70,15 @@ class ScalpBotGUI:
                      fieldbackground="#313244", font=("Consolas", 9))
         s.configure("Treeview.Heading", background="#45475a", foreground=fg,
                      font=("Consolas", 9, "bold"))
+        s.configure("TNotebook", background=bg)
+        s.configure("TNotebook.Tab", background="#313244", foreground=fg,
+                     font=("Consolas", 10, "bold"), padding=[10, 4])
+        s.map("TNotebook.Tab",
+              background=[("selected", accent)],
+              foreground=[("selected", "#1e1e2e")])
 
     def _build_ui(self):
-        # Top bar
+        # Top bar: controls + status
         top = ttk.Frame(self.root)
         top.pack(fill=tk.X, padx=10, pady=5)
         self._build_control_bar(top)
@@ -79,9 +88,30 @@ class ScalpBotGUI:
         state_frame.pack(fill=tk.X, padx=10, pady=2)
         self._build_state_bar(state_frame)
 
-        # Main area
-        main = ttk.Frame(self.root)
-        main.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        # Notebook (tabs)
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        # Tab 1: Dashboard
+        tab_dashboard = ttk.Frame(self.notebook)
+        self.notebook.add(tab_dashboard, text="  Dashboard  ")
+        self._build_dashboard_tab(tab_dashboard)
+
+        # Tab 2: Chart
+        tab_chart = ttk.Frame(self.notebook)
+        self.notebook.add(tab_chart, text="  Graphique  ")
+        self.chart_panel = ChartPanel(tab_chart, self.config)
+
+        # Bottom: signal bar
+        bottom = ttk.Frame(self.root)
+        bottom.pack(fill=tk.X, padx=10, pady=5)
+        self._build_signal_bar(bottom)
+
+    # ── Dashboard tab ────────────────────────────────────────────
+
+    def _build_dashboard_tab(self, parent):
+        main = ttk.Frame(parent)
+        main.pack(fill=tk.BOTH, expand=True)
 
         # Left column: parameters + indicators
         left = ttk.Frame(main)
@@ -94,11 +124,6 @@ class ScalpBotGUI:
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._build_log_panel(right)
         self._build_positions_panel(right)
-
-        # Bottom: signal
-        bottom = ttk.Frame(self.root)
-        bottom.pack(fill=tk.X, padx=10, pady=5)
-        self._build_signal_bar(bottom)
 
     # ── Control bar ──────────────────────────────────────────────
 
@@ -347,6 +372,9 @@ class ScalpBotGUI:
                 text=signal.reason or "Pas de signal",
                 style="Status.TLabel"
             )
+            # Clear trade levels on chart if no active position
+            if not self.engine.active_trade:
+                self.chart_panel.set_trade_levels(None)
         elif signal.direction == "BUY":
             self.lbl_signal.config(
                 text=(
@@ -356,6 +384,12 @@ class ScalpBotGUI:
                 ),
                 style="Buy.TLabel"
             )
+            self.chart_panel.set_trade_levels({
+                "direction": "BUY",
+                "entry": signal.entry_price,
+                "sl": signal.sl,
+                "tp1": signal.tp1, "tp2": signal.tp2, "tp3": signal.tp3,
+            })
         else:
             self.lbl_signal.config(
                 text=(
@@ -365,6 +399,12 @@ class ScalpBotGUI:
                 ),
                 style="Sell.TLabel"
             )
+            self.chart_panel.set_trade_levels({
+                "direction": "SELL",
+                "entry": signal.entry_price,
+                "sl": signal.sl,
+                "tp1": signal.tp1, "tp2": signal.tp2, "tp3": signal.tp3,
+            })
 
     def _update_state(self, state_str: str):
         state_styles = {
@@ -427,6 +467,10 @@ class ScalpBotGUI:
                 labels["sma_dir"].config(text="HAUSSE", style="Buy.TLabel")
             else:
                 labels["sma_dir"].config(text="BAISSE", style="Sell.TLabel")
+
+    def _update_chart(self, df):
+        """Update the chart with new candle data."""
+        self.chart_panel.update_chart(df)
 
     def run(self):
         """Start the Tkinter main loop."""
